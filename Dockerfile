@@ -7,5 +7,4 @@ RUN uv sync
 RUN uv run playwright install chromium --with-deps
 
 EXPOSE 8000
-CMD ["uv", "run", "uvicorn", "src.markus_plus_mcp.server:app", \
-     "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uv run uvicorn src.markus_plus_mcp.server:app --host 0.0.0.0 --port ${PORT:-8000}"]
