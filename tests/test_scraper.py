@@ -1,0 +1,189 @@
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+import markus_plus_mcp.scraper as scraper
+
+SAMPLE_PAGE_HTML = """
+<html>
+<body>
+  <div class="markdown-preview-view">
+    <p>Hello from markus.plus</p>
+    <p>This is some content about Python and testing.</p>
+  </div>
+</body>
+</html>
+"""
+
+NAV_HTML = """
+<html>
+<body>
+  <nav>
+    <a href="/om">Om</a>
+    <a href="/prosjekt">Prosjekt</a>
+    <a href="https://external.com">External</a>
+  </nav>
+</body>
+</html>
+"""
+
+FRONTMATTER_HTML = """
+<html>
+<body>
+  <div class="metadata-container">
+    <table>
+      <tr><th>title</th><td>My Page</td></tr>
+      <tr><th>date</th><td>2024-01-01</td></tr>
+      <tr><th>tags</th><td>python, mcp</td></tr>
+    </table>
+  </div>
+</body>
+</html>
+"""
+
+NO_CONTENT_HTML = "<html><body><p>No content div here</p></body></html>"
+
+SITEMAP_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://markus.plus/om</loc></url>
+  <url><loc>https://markus.plus/prosjekt</loc></url>
+</urlset>"""
+
+
+@pytest.fixture(autouse=True)
+def clear_page_cache() -> None:
+    scraper._page_cache.clear()
+
+
+@pytest.mark.asyncio
+async def test_get_page_text_returns_text() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=SAMPLE_PAGE_HTML)):
+        result = await scraper.get_page_text("/om")
+    assert "Hello from markus.plus" in result
+    assert "Python and testing" in result
+
+
+@pytest.mark.asyncio
+async def test_get_page_text_empty_when_no_selector() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=NO_CONTENT_HTML)):
+        result = await scraper.get_page_text("/missing")
+    assert result == ""
+
+
+def test_fetch_sitemap_parses_xml() -> None:
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = SITEMAP_XML
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = scraper._fetch_sitemap()
+
+    assert "/om" in result
+    assert "/prosjekt" in result
+
+
+def test_fetch_sitemap_excludes_external() -> None:
+    xml_with_external = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://markus.plus/om</loc></url>
+  <url><loc>https://other.com/page</loc></url>
+</urlset>"""
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = xml_with_external
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = scraper._fetch_sitemap()
+
+    assert "/om" in result
+    assert "https://other.com/page" not in result
+
+
+@pytest.mark.asyncio
+async def test_list_all_pages_uses_sitemap() -> None:
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = SITEMAP_XML
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = await scraper.list_all_pages()
+
+    assert "/om" in result
+    assert "/prosjekt" in result
+
+
+@pytest.mark.asyncio
+async def test_list_all_pages_falls_back_to_nav() -> None:
+    async def fake_get_html(path: str) -> str:
+        return NAV_HTML
+
+    with (
+        patch("urllib.request.urlopen", side_effect=OSError("network error")),
+        patch.object(scraper, "_get_page_html", new=AsyncMock(side_effect=fake_get_html)),
+    ):
+        result = await scraper.list_all_pages()
+
+    assert "/om" in result
+    assert "/prosjekt" in result
+    assert "https://external.com" not in result
+
+
+@pytest.mark.asyncio
+async def test_search_pages_finds_match() -> None:
+    async def fake_list() -> list[str]:
+        return ["/om", "/prosjekt"]
+
+    async def fake_text(path: str) -> str:
+        if path == "/om":
+            return "This page is about Python programming and testing frameworks."
+        return "Unrelated content about cooking."
+
+    with (
+        patch.object(scraper, "list_all_pages", new=AsyncMock(side_effect=fake_list)),
+        patch.object(scraper, "get_page_text", new=AsyncMock(side_effect=fake_text)),
+    ):
+        results = await scraper.search_pages("Python")
+
+    assert len(results) == 1
+    assert results[0]["path"] == "/om"
+    assert "Python" in results[0]["excerpt"]
+
+
+@pytest.mark.asyncio
+async def test_search_pages_no_match() -> None:
+    async def fake_list() -> list[str]:
+        return ["/om"]
+
+    async def fake_text(path: str) -> str:
+        return "Nothing relevant here."
+
+    with (
+        patch.object(scraper, "list_all_pages", new=AsyncMock(side_effect=fake_list)),
+        patch.object(scraper, "get_page_text", new=AsyncMock(side_effect=fake_text)),
+    ):
+        results = await scraper.search_pages("nonexistent")
+
+    assert results == []
+
+
+@pytest.mark.asyncio
+async def test_get_frontmatter_returns_dict() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=FRONTMATTER_HTML)):
+        result = await scraper.get_page_frontmatter("/om")
+
+    assert result.get("title") == "My Page"
+    assert result.get("date") == "2024-01-01"
+    assert result.get("tags") == "python, mcp"
+
+
+@pytest.mark.asyncio
+async def test_get_frontmatter_empty_when_no_table() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=NO_CONTENT_HTML)):
+        result = await scraper.get_page_frontmatter("/om")
+
+    assert result == {}
