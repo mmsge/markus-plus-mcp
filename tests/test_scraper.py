@@ -109,6 +109,12 @@ SITEMAP_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
   <url><loc>https://markus.plus/prosjekt</loc></url>
 </urlset>"""
 
+SITEMAP_XML_NO_NS = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset>
+  <url><loc>https://markus.plus/reisar</loc></url>
+  <url><loc>https://markus.plus/tankekart</loc></url>
+</urlset>"""
+
 
 @pytest.fixture(autouse=True)
 def clear_page_cache() -> None:
@@ -141,6 +147,19 @@ def test_fetch_sitemap_parses_xml() -> None:
 
     assert "/om" in result
     assert "/prosjekt" in result
+
+
+def test_fetch_sitemap_parses_xml_no_namespace() -> None:
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = SITEMAP_XML_NO_NS
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = scraper._fetch_sitemap()
+
+    assert "/reisar" in result
+    assert "/tankekart" in result
 
 
 def test_fetch_sitemap_excludes_external() -> None:
@@ -177,12 +196,9 @@ async def test_list_all_pages_uses_sitemap() -> None:
 
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav() -> None:
-    async def fake_get_html(path: str) -> str:
-        return NAV_HTML
-
     with (
         patch("urllib.request.urlopen", side_effect=OSError("network error")),
-        patch.object(scraper, "_get_page_html", new=AsyncMock(side_effect=fake_get_html)),
+        patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_HTML)),
     ):
         result = await scraper.list_all_pages()
 
@@ -258,12 +274,9 @@ async def test_get_frontmatter_obsidian_publish_format() -> None:
 
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav_file_title() -> None:
-    async def fake_get_html(path: str) -> str:
-        return NAV_FILE_TREE_HTML
-
     with (
         patch("urllib.request.urlopen", side_effect=OSError("network error")),
-        patch.object(scraper, "_get_page_html", new=AsyncMock(side_effect=fake_get_html)),
+        patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_FILE_TREE_HTML)),
     ):
         result = await scraper.list_all_pages()
 
