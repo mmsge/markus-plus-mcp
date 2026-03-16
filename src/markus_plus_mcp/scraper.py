@@ -74,25 +74,42 @@ def _fetch_sitemap() -> list[str]:
         body = resp.read()
     root = ET.parse(BytesIO(body)).getroot()
     ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    locs = root.findall(".//sm:loc", ns)
+    if not locs:
+        # Fallback: try without namespace prefix (some sitemap generators omit it)
+        locs = root.findall(".//loc")
     return [
         loc.text.replace(BASE_URL, "")
-        for loc in root.findall(".//sm:loc", ns)
+        for loc in locs
         if loc.text and loc.text.startswith(BASE_URL)
     ]
+
+
+async def _fetch_homepage_for_nav() -> str:  # pragma: no cover
+    """Fetch homepage HTML waiting specifically for nav elements, bypassing the content cache."""
+    browser = await _get_browser()
+    page = await browser.new_page()
+    try:
+        await page.goto(BASE_URL)
+        with contextlib.suppress(Exception):
+            await page.wait_for_selector(".nav-file-title", timeout=10000)
+        return await page.content()
+    finally:
+        await page.close()
 
 
 async def list_all_pages() -> list[str]:
     # Try sitemap.xml first (Obsidian Publish standard, no JS needed)
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         urls = await loop.run_in_executor(None, _fetch_sitemap)
         if urls:
             return urls
     except Exception:
         pass
 
-    # Fallback: scrape Obsidian Publish nav from homepage
-    html = await _get_page_html("/")
+    # Fallback: scrape Obsidian Publish nav from homepage, waiting for nav elements
+    html = await _fetch_homepage_for_nav()
     soup = BeautifulSoup(html, "html.parser")
     seen: set[str] = set()
     result: list[str] = []
