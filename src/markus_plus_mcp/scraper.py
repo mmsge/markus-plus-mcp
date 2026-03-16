@@ -54,7 +54,18 @@ async def get_page_text(path: str) -> str:
     html = await _get_page_html(path)
     soup = BeautifulSoup(html, "html.parser")
     content = soup.select_one(CONTENT_SELECTOR)
-    return content.get_text(separator="\n", strip=True) if content else ""
+    if content:
+        text = content.get_text(separator="\n", strip=True)
+        if text:
+            return text
+    # Fallback: broader content selectors for pages with non-standard structure
+    for selector in [".view-content", "main", "article"]:
+        content = soup.select_one(selector)
+        if content:
+            text = content.get_text(separator="\n", strip=True)
+            if text:
+                return text
+    return ""
 
 
 def _fetch_sitemap() -> list[str]:
@@ -80,13 +91,26 @@ async def list_all_pages() -> list[str]:
     except Exception:
         pass
 
-    # Fallback: scrape nav links from homepage
+    # Fallback: scrape Obsidian Publish nav from homepage
     html = await _get_page_html("/")
     soup = BeautifulSoup(html, "html.parser")
-    links = soup.select("nav a[href]")
     seen: set[str] = set()
     result: list[str] = []
-    for a in links:
+
+    # Obsidian Publish file tree: .nav-file-title[data-path] (e.g. data-path="om.md")
+    for el in soup.select(".nav-file-title[data-path]"):
+        data_path = el.get("data-path", "")
+        if isinstance(data_path, str) and data_path:
+            slug = "/" + data_path.removesuffix(".md")
+            if slug not in seen:
+                seen.add(slug)
+                result.append(slug)
+
+    if result:
+        return result
+
+    # Final fallback: generic nav links
+    for a in soup.select("nav a[href]"):
         href = a.get("href", "")
         if isinstance(href, str) and href.startswith("/") and href not in seen:
             seen.add(href)
@@ -111,12 +135,23 @@ async def search_pages(query: str) -> list[dict[str, Any]]:
 async def get_page_frontmatter(path: str) -> dict[str, str]:
     html = await _get_page_html(path)
     soup = BeautifulSoup(html, "html.parser")
+    result: dict[str, str] = {}
+
+    # Obsidian Publish (v1.4+): .metadata-property elements
+    for prop in soup.select(".metadata-property"):
+        key_el = prop.select_one(".metadata-property-name")
+        val_el = prop.select_one(".metadata-property-value")
+        if key_el and val_el:
+            result[key_el.get_text(strip=True)] = val_el.get_text(strip=True)
+
+    if result:
+        return result
+
+    # Fallback: table-based .metadata-container or .frontmatter
     table = soup.select_one(".metadata-container, .frontmatter")
     if not table:
         return {}
-    rows = table.select("tr")
-    result: dict[str, str] = {}
-    for row in rows:
+    for row in table.select("tr"):
         key_el = row.select_one("th, td:first-child")
         val_el = row.select_one("td:last-child")
         if key_el and val_el and key_el != val_el:
