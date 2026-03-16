@@ -19,6 +19,8 @@ _browser_lock = asyncio.Lock()
 
 _page_cache: cachetools.TTLCache[str, str] = cachetools.TTLCache(maxsize=100, ttl=1800)
 _cache_lock = asyncio.Lock()
+_pages_cache: cachetools.TTLCache[str, list[str]] = cachetools.TTLCache(maxsize=1, ttl=1800)
+_pages_cache_lock = asyncio.Lock()
 
 
 async def _get_browser() -> Browser:  # pragma: no cover
@@ -78,11 +80,16 @@ def _fetch_sitemap() -> list[str]:
     if not locs:
         # Fallback: try without namespace prefix (some sitemap generators omit it)
         locs = root.findall(".//loc")
-    return [
-        loc.text.replace(BASE_URL, "")
-        for loc in locs
-        if loc.text and loc.text.startswith(BASE_URL)
-    ]
+    paths = []
+    for loc in locs:
+        if not loc.text or not loc.text.startswith(BASE_URL):
+            continue
+        path = loc.text.removeprefix(BASE_URL) or "/"
+        # Skip internal Obsidian Publish configuration entries
+        if path.startswith("/_publish/"):
+            continue
+        paths.append(path)
+    return paths
 
 
 async def _fetch_homepage_for_nav() -> str:  # pragma: no cover
@@ -99,11 +106,18 @@ async def _fetch_homepage_for_nav() -> str:  # pragma: no cover
 
 
 async def list_all_pages() -> list[str]:
+    async with _pages_cache_lock:
+        cached = _pages_cache.get("pages")
+        if cached is not None:
+            return cached
+
     # Try sitemap.xml first (Obsidian Publish standard, no JS needed)
     try:
         loop = asyncio.get_running_loop()
         urls = await loop.run_in_executor(None, _fetch_sitemap)
         if urls:
+            async with _pages_cache_lock:
+                _pages_cache["pages"] = urls
             return urls
     except Exception:
         pass
@@ -124,6 +138,8 @@ async def list_all_pages() -> list[str]:
                 result.append(slug)
 
     if result:
+        async with _pages_cache_lock:
+            _pages_cache["pages"] = result
         return result
 
     # Final fallback: generic nav links
@@ -132,6 +148,9 @@ async def list_all_pages() -> list[str]:
         if isinstance(href, str) and href.startswith("/") and href not in seen:
             seen.add(href)
             result.append(href)
+    if result:
+        async with _pages_cache_lock:
+            _pages_cache["pages"] = result
     return result
 
 
