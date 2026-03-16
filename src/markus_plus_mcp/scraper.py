@@ -160,10 +160,13 @@ async def list_all_pages() -> list[str]:
     return result
 
 
-async def search_pages(query: str) -> list[dict[str, Any]]:
-    pages = await list_all_pages()
+async def search_pages(
+    query: str, offset: int = 0, page_size: int = 10
+) -> dict[str, Any]:
+    all_pages = await list_all_pages()
+    total_pages = len(all_pages)
+    batch = all_pages[offset : offset + page_size]
     lower_query = query.lower()
-    results: list[dict[str, Any]] = []
     semaphore = asyncio.Semaphore(5)
 
     async def check_page(path: str) -> dict[str, Any] | None:
@@ -179,9 +182,17 @@ async def search_pages(query: str) -> list[dict[str, Any]]:
                 return {"path": path, "excerpt": excerpt}
             return None
 
-    hits = await asyncio.gather(*[check_page(p) for p in pages])
-    results = [h for h in hits if h is not None]
-    return results
+    hits = await asyncio.gather(*[check_page(p) for p in batch])
+    matches = [h for h in hits if h is not None]
+    next_offset = offset + page_size
+    return {
+        "matches": matches,
+        "offset": offset,
+        "page_size": page_size,
+        "pages_searched": len(batch),
+        "next_offset": next_offset if next_offset < total_pages else None,
+        "total_pages": total_pages,
+    }
 
 
 async def get_page_frontmatter(path: str) -> dict[str, str]:

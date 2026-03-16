@@ -22,9 +22,11 @@ async def get_page(path: str) -> str:
 
 
 @mcp.tool()
-async def search(query: str) -> list[dict[str, Any]]:
-    """Search across all pages for a query, returns matches with excerpts"""
-    return await search_pages(query)
+async def search(query: str, offset: int = 0, page_size: int = 10) -> dict[str, Any]:
+    """Search across all pages for a query, returns matches with excerpts.
+    Use offset and page_size to paginate through results (default: 10 pages per call).
+    If next_offset is present in the response, pass it as offset to get the next batch."""
+    return await search_pages(query, offset=offset, page_size=page_size)
 
 
 @mcp.tool()

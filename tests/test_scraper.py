@@ -272,9 +272,10 @@ async def test_search_pages_finds_match() -> None:
     ):
         results = await scraper.search_pages("Python")
 
-    assert len(results) == 1
-    assert results[0]["path"] == "/om"
-    assert "Python" in results[0]["excerpt"]
+    assert len(results["matches"]) == 1
+    assert results["matches"][0]["path"] == "/om"
+    assert "Python" in results["matches"][0]["excerpt"]
+    assert results["next_offset"] is None
 
 
 @pytest.mark.asyncio
@@ -291,7 +292,8 @@ async def test_search_pages_no_match() -> None:
     ):
         results = await scraper.search_pages("nonexistent")
 
-    assert results == []
+    assert results["matches"] == []
+    assert results["next_offset"] is None
 
 
 @pytest.mark.asyncio
