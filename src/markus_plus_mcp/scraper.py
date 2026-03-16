@@ -42,6 +42,8 @@ async def _get_page_html(path: str) -> str:  # pragma: no cover
         await page.goto(f"{BASE_URL}{path}")
         with contextlib.suppress(Exception):
             await page.wait_for_selector(CONTENT_SELECTOR, timeout=10000)
+        with contextlib.suppress(Exception):
+            await page.wait_for_selector(".metadata-container", timeout=3000)
         html = await page.content()
     finally:
         await page.close()
@@ -195,6 +197,18 @@ async def search_pages(
     }
 
 
+def _extract_property_value(val_el: Any) -> str:
+    """Extract text from a metadata property value element.
+
+    Handles multi-select pills (e.g. tags rendered as a list) by joining
+    them with ', '. Falls back to plain text for scalar values.
+    """
+    pills = val_el.select(".multi-select-pill-content")
+    if pills:
+        return ", ".join(p.get_text(strip=True) for p in pills)
+    return val_el.get_text(strip=True)
+
+
 async def get_page_frontmatter(path: str) -> dict[str, str]:
     html = await _get_page_html(path)
     soup = BeautifulSoup(html, "html.parser")
@@ -205,7 +219,7 @@ async def get_page_frontmatter(path: str) -> dict[str, str]:
         key_el = prop.select_one(".metadata-property-name")
         val_el = prop.select_one(".metadata-property-value")
         if key_el and val_el:
-            result[key_el.get_text(strip=True)] = val_el.get_text(strip=True)
+            result[key_el.get_text(strip=True)] = _extract_property_value(val_el)
 
     if result:
         return result
@@ -218,5 +232,5 @@ async def get_page_frontmatter(path: str) -> dict[str, str]:
         key_el = row.select_one("th, td:first-child")
         val_el = row.select_one("td:last-child")
         if key_el and val_el and key_el != val_el:
-            result[key_el.get_text(strip=True)] = val_el.get_text(strip=True)
+            result[key_el.get_text(strip=True)] = _extract_property_value(val_el)
     return result
