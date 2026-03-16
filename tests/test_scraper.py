@@ -62,6 +62,34 @@ FRONTMATTER_HTML = """
 
 NO_CONTENT_HTML = "<html><body><p>No content div here</p></body></html>"
 
+OBSIDIAN_TAGS_HTML = """
+<html>
+<body>
+  <div class="metadata-container mod-trustall">
+    <div class="metadata-content">
+      <div class="metadata-properties">
+        <div class="metadata-property" data-property-key="tags">
+          <div class="metadata-property-key">
+            <span class="metadata-property-name">tags</span>
+          </div>
+          <div class="metadata-property-value">
+            <div class="multi-select-container">
+              <div class="multi-select-pill">
+                <span class="multi-select-pill-content">python</span>
+              </div>
+              <div class="multi-select-pill">
+                <span class="multi-select-pill-content">mcp</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
 OBSIDIAN_FRONTMATTER_HTML = """
 <html>
 <body>
@@ -321,6 +349,14 @@ async def test_get_frontmatter_obsidian_publish_format() -> None:
 
     assert result.get("permalink") == "/"
     assert result.get("description") == "Om meg og tankane mine"
+
+
+@pytest.mark.asyncio
+async def test_get_frontmatter_tags_as_pills() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=OBSIDIAN_TAGS_HTML)):
+        result = await scraper.get_page_frontmatter("/om")
+
+    assert result.get("tags") == "python, mcp"
 
 
 @pytest.mark.asyncio
