@@ -162,15 +162,25 @@ async def list_all_pages() -> list[str]:
 
 async def search_pages(query: str) -> list[dict[str, Any]]:
     pages = await list_all_pages()
+    lower_query = query.lower()
     results: list[dict[str, Any]] = []
-    for path in pages:
-        text = await get_page_text(path)
-        lower_text = text.lower()
-        lower_query = query.lower()
-        if lower_query in lower_text:
-            idx = lower_text.index(lower_query)
-            excerpt = text[max(0, idx - 100) : idx + 200]
-            results.append({"path": path, "excerpt": excerpt})
+    semaphore = asyncio.Semaphore(5)
+
+    async def check_page(path: str) -> dict[str, Any] | None:
+        async with semaphore:
+            try:
+                text = await get_page_text(path)
+            except Exception:
+                return None
+            lower_text = text.lower()
+            if lower_query in lower_text:
+                idx = lower_text.index(lower_query)
+                excerpt = text[max(0, idx - 100) : idx + 200]
+                return {"path": path, "excerpt": excerpt}
+            return None
+
+    hits = await asyncio.gather(*[check_page(p) for p in pages])
+    results = [h for h in hits if h is not None]
     return results
 
 
