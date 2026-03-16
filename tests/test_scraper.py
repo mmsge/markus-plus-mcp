@@ -6,6 +6,23 @@ import pytest
 
 import markus_plus_mcp.scraper as scraper
 
+
+def _make_browser_mock(body: bytes) -> tuple[MagicMock, MagicMock]:
+    """Return (mock_browser, mock_page) where page.goto returns a response with body."""
+    mock_response = AsyncMock()
+    mock_response.ok = True
+    mock_response.body = AsyncMock(return_value=body)
+
+    mock_page = AsyncMock()
+    mock_page.goto = AsyncMock(return_value=mock_response)
+    mock_page.__aenter__ = AsyncMock(return_value=mock_page)
+    mock_page.__aexit__ = AsyncMock(return_value=False)
+
+    mock_browser = MagicMock()
+    mock_browser.new_page = AsyncMock(return_value=mock_page)
+
+    return mock_browser, mock_page
+
 SAMPLE_PAGE_HTML = """
 <html>
 <body>
@@ -137,81 +154,66 @@ async def test_get_page_text_empty_when_no_selector() -> None:
     assert result == ""
 
 
-def test_fetch_sitemap_parses_xml() -> None:
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = SITEMAP_XML
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = scraper._fetch_sitemap()
+@pytest.mark.asyncio
+async def test_fetch_sitemap_parses_xml() -> None:
+    mock_browser, _ = _make_browser_mock(SITEMAP_XML)
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
+        result = await scraper._fetch_sitemap()
 
     assert "/om" in result
     assert "/prosjekt" in result
 
 
-def test_fetch_sitemap_parses_xml_no_namespace() -> None:
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = SITEMAP_XML_NO_NS
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = scraper._fetch_sitemap()
+@pytest.mark.asyncio
+async def test_fetch_sitemap_parses_xml_no_namespace() -> None:
+    mock_browser, _ = _make_browser_mock(SITEMAP_XML_NO_NS)
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
+        result = await scraper._fetch_sitemap()
 
     assert "/reisar" in result
     assert "/tankekart" in result
 
 
-def test_fetch_sitemap_excludes_external() -> None:
+@pytest.mark.asyncio
+async def test_fetch_sitemap_excludes_external() -> None:
     xml_with_external = b"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://markus.plus/om</loc></url>
   <url><loc>https://other.com/page</loc></url>
 </urlset>"""
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = xml_with_external
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = scraper._fetch_sitemap()
+    mock_browser, _ = _make_browser_mock(xml_with_external)
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
+        result = await scraper._fetch_sitemap()
 
     assert "/om" in result
     assert "https://other.com/page" not in result
 
 
-def test_fetch_sitemap_excludes_publish_entries() -> None:
+@pytest.mark.asyncio
+async def test_fetch_sitemap_excludes_publish_entries() -> None:
     xml_with_publish = b"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://markus.plus/_publish/Hovud</loc></url>
   <url><loc>https://markus.plus/meg</loc></url>
 </urlset>"""
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = xml_with_publish
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = scraper._fetch_sitemap()
+    mock_browser, _ = _make_browser_mock(xml_with_publish)
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
+        result = await scraper._fetch_sitemap()
 
     assert "/meg" in result
     assert "/_publish/Hovud" not in result
 
 
-def test_fetch_sitemap_normalizes_bare_domain() -> None:
+@pytest.mark.asyncio
+async def test_fetch_sitemap_normalizes_bare_domain() -> None:
     xml_bare = b"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://markus.plus</loc></url>
   <url><loc>https://markus.plus/om</loc></url>
 </urlset>"""
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = xml_bare
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
-        result = scraper._fetch_sitemap()
+    mock_browser, _ = _make_browser_mock(xml_bare)
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
+        result = await scraper._fetch_sitemap()
 
     assert "/" in result
     assert "/om" in result
@@ -220,28 +222,21 @@ def test_fetch_sitemap_normalizes_bare_domain() -> None:
 
 @pytest.mark.asyncio
 async def test_list_all_pages_caches_result() -> None:
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = SITEMAP_XML
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
+    mock_browser, _ = _make_browser_mock(SITEMAP_XML)
 
     scraper._pages_cache.clear()
-    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
         await scraper.list_all_pages()
         await scraper.list_all_pages()
 
-    # urlopen called only once; second call served from cache
-    assert mock_urlopen.call_count == 1
+    # new_page called only once; second call served from cache
+    assert mock_browser.new_page.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_list_all_pages_uses_sitemap() -> None:
-    mock_resp = MagicMock()
-    mock_resp.read.return_value = SITEMAP_XML
-    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
-    mock_resp.__exit__ = MagicMock(return_value=False)
-
-    with patch("urllib.request.urlopen", return_value=mock_resp):
+    mock_browser, _ = _make_browser_mock(SITEMAP_XML)
+    with patch.object(scraper, "_get_browser", new=AsyncMock(return_value=mock_browser)):
         result = await scraper.list_all_pages()
 
     assert "/om" in result
@@ -251,7 +246,7 @@ async def test_list_all_pages_uses_sitemap() -> None:
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav() -> None:
     with (
-        patch("urllib.request.urlopen", side_effect=OSError("network error")),
+        patch.object(scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("network error"))),
         patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_HTML)),
     ):
         result = await scraper.list_all_pages()
