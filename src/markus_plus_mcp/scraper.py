@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import urllib.request
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Any
@@ -70,10 +69,18 @@ async def get_page_text(path: str) -> str:
     return ""
 
 
-def _fetch_sitemap() -> list[str]:
-    """Fetch and parse sitemap.xml using urllib (no JS needed)."""
-    with urllib.request.urlopen(f"{BASE_URL}/sitemap.xml", timeout=10) as resp:
-        body = resp.read()
+async def _fetch_sitemap() -> list[str]:
+    """Fetch and parse sitemap.xml using Playwright (handles bot protection/CDN blocking)."""
+    browser = await _get_browser()
+    page = await browser.new_page()
+    try:
+        response = await page.goto(f"{BASE_URL}/sitemap.xml")
+        if response is None or not response.ok:
+            return []
+        body = await response.body()
+    finally:
+        await page.close()
+
     root = ET.parse(BytesIO(body)).getroot()
     ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
     locs = root.findall(".//sm:loc", ns)
@@ -113,8 +120,7 @@ async def list_all_pages() -> list[str]:
 
     # Try sitemap.xml first (Obsidian Publish standard, no JS needed)
     try:
-        loop = asyncio.get_running_loop()
-        urls = await loop.run_in_executor(None, _fetch_sitemap)
+        urls = await _fetch_sitemap()
         if urls:
             async with _pages_cache_lock:
                 _pages_cache["pages"] = urls
