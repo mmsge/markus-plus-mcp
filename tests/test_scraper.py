@@ -45,6 +45,64 @@ FRONTMATTER_HTML = """
 
 NO_CONTENT_HTML = "<html><body><p>No content div here</p></body></html>"
 
+OBSIDIAN_FRONTMATTER_HTML = """
+<html>
+<body>
+  <div class="metadata-container mod-trustall">
+    <div class="metadata-content">
+      <div class="metadata-properties">
+        <div class="metadata-property" data-property-key="permalink">
+          <div class="metadata-property-key">
+            <span class="metadata-property-name">permalink</span>
+          </div>
+          <div class="metadata-property-value">
+            <div class="metadata-input-longtext mod-truncate">/</div>
+          </div>
+        </div>
+        <div class="metadata-property" data-property-key="description">
+          <div class="metadata-property-key">
+            <span class="metadata-property-name">description</span>
+          </div>
+          <div class="metadata-property-value">
+            <div class="metadata-input-longtext mod-truncate">Om meg og tankane mine</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+NAV_FILE_TREE_HTML = """
+<html>
+<body>
+  <div class="nav-folder-children">
+    <div class="nav-file">
+      <div class="nav-file-title" data-path="om.md">Om</div>
+    </div>
+    <div class="nav-file">
+      <div class="nav-file-title" data-path="prosjekt.md">Prosjekt</div>
+    </div>
+    <div class="nav-folder">
+      <div class="nav-file-title" data-path="reiser/tog.md">Tog</div>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+BROADER_CONTENT_HTML = """
+<html>
+<body>
+  <div class="markdown-preview-view"></div>
+  <main>
+    <p>Fallback content here</p>
+  </main>
+</body>
+</html>
+"""
+
 SITEMAP_XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
   <url><loc>https://markus.plus/om</loc></url>
@@ -187,3 +245,37 @@ async def test_get_frontmatter_empty_when_no_table() -> None:
         result = await scraper.get_page_frontmatter("/om")
 
     assert result == {}
+
+
+@pytest.mark.asyncio
+async def test_get_frontmatter_obsidian_publish_format() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=OBSIDIAN_FRONTMATTER_HTML)):
+        result = await scraper.get_page_frontmatter("/")
+
+    assert result.get("permalink") == "/"
+    assert result.get("description") == "Om meg og tankane mine"
+
+
+@pytest.mark.asyncio
+async def test_list_all_pages_falls_back_to_nav_file_title() -> None:
+    async def fake_get_html(path: str) -> str:
+        return NAV_FILE_TREE_HTML
+
+    with (
+        patch("urllib.request.urlopen", side_effect=OSError("network error")),
+        patch.object(scraper, "_get_page_html", new=AsyncMock(side_effect=fake_get_html)),
+    ):
+        result = await scraper.list_all_pages()
+
+    assert "/om" in result
+    assert "/prosjekt" in result
+    assert "/reiser/tog" in result
+    assert "https://external.com" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_page_text_falls_back_to_broader_selector() -> None:
+    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=BROADER_CONTENT_HTML)):
+        result = await scraper.get_page_text("/om")
+
+    assert "Fallback content here" in result
