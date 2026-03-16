@@ -119,6 +119,7 @@ SITEMAP_XML_NO_NS = b"""<?xml version="1.0" encoding="UTF-8"?>
 @pytest.fixture(autouse=True)
 def clear_page_cache() -> None:
     scraper._page_cache.clear()
+    scraper._pages_cache.clear()
 
 
 @pytest.mark.asyncio
@@ -178,6 +179,59 @@ def test_fetch_sitemap_excludes_external() -> None:
 
     assert "/om" in result
     assert "https://other.com/page" not in result
+
+
+def test_fetch_sitemap_excludes_publish_entries() -> None:
+    xml_with_publish = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://markus.plus/_publish/Hovud</loc></url>
+  <url><loc>https://markus.plus/meg</loc></url>
+</urlset>"""
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = xml_with_publish
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = scraper._fetch_sitemap()
+
+    assert "/meg" in result
+    assert "/_publish/Hovud" not in result
+
+
+def test_fetch_sitemap_normalizes_bare_domain() -> None:
+    xml_bare = b"""<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://markus.plus</loc></url>
+  <url><loc>https://markus.plus/om</loc></url>
+</urlset>"""
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = xml_bare
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    with patch("urllib.request.urlopen", return_value=mock_resp):
+        result = scraper._fetch_sitemap()
+
+    assert "/" in result
+    assert "/om" in result
+    assert "" not in result
+
+
+@pytest.mark.asyncio
+async def test_list_all_pages_caches_result() -> None:
+    mock_resp = MagicMock()
+    mock_resp.read.return_value = SITEMAP_XML
+    mock_resp.__enter__ = MagicMock(return_value=mock_resp)
+    mock_resp.__exit__ = MagicMock(return_value=False)
+
+    scraper._pages_cache.clear()
+    with patch("urllib.request.urlopen", return_value=mock_resp) as mock_urlopen:
+        await scraper.list_all_pages()
+        await scraper.list_all_pages()
+
+    # urlopen called only once; second call served from cache
+    assert mock_urlopen.call_count == 1
 
 
 @pytest.mark.asyncio
