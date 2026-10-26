@@ -378,7 +378,7 @@ async def test_get_frontmatter_tags_as_pills() -> None:
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav_file_title() -> None:
     with (
-        patch("urllib.request.urlopen", side_effect=OSError("network error")),
+        patch.object(scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("down"))),
         patch.object(
             scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_FILE_TREE_HTML)
         ),
