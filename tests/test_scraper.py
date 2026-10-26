@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
+import time
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 import markus_plus_mcp.scraper as scraper
@@ -22,6 +26,7 @@ def _make_browser_mock(body: bytes) -> tuple[MagicMock, MagicMock]:
     mock_browser.new_page = AsyncMock(return_value=mock_page)
 
     return mock_browser, mock_page
+
 
 SAMPLE_PAGE_HTML = """
 <html>
@@ -162,9 +167,16 @@ SITEMAP_XML_NO_NS = b"""<?xml version="1.0" encoding="UTF-8"?>
 
 
 @pytest.fixture(autouse=True)
-def clear_page_cache() -> None:
+def clear_page_cache() -> Iterator[None]:
     scraper._page_cache.clear()
     scraper._pages_cache.clear()
+    scraper._index_cache.clear()
+    scraper._last_index_fetch = float("-inf")
+    # Default: the index is unreachable, so legacy tests exercise the Playwright fallbacks
+    with patch.object(
+        scraper, "_http_get_text", new=AsyncMock(side_effect=httpx.ConnectError("offline"))
+    ):
+        yield
 
 
 @pytest.mark.asyncio
@@ -274,7 +286,9 @@ async def test_list_all_pages_uses_sitemap() -> None:
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav() -> None:
     with (
-        patch.object(scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("network error"))),
+        patch.object(
+            scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("network error"))
+        ),
         patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_HTML)),
     ):
         result = await scraper.list_all_pages()
@@ -344,7 +358,9 @@ async def test_get_frontmatter_empty_when_no_table() -> None:
 
 @pytest.mark.asyncio
 async def test_get_frontmatter_obsidian_publish_format() -> None:
-    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=OBSIDIAN_FRONTMATTER_HTML)):
+    with patch.object(
+        scraper, "_get_page_html", new=AsyncMock(return_value=OBSIDIAN_FRONTMATTER_HTML)
+    ):
         result = await scraper.get_page_frontmatter("/")
 
     assert result.get("permalink") == "/"
@@ -362,8 +378,10 @@ async def test_get_frontmatter_tags_as_pills() -> None:
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav_file_title() -> None:
     with (
-        patch("urllib.request.urlopen", side_effect=OSError("network error")),
-        patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_FILE_TREE_HTML)),
+        patch.object(scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("down"))),
+        patch.object(
+            scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_FILE_TREE_HTML)
+        ),
     ):
         result = await scraper.list_all_pages()
 
@@ -379,3 +397,181 @@ async def test_get_page_text_falls_back_to_broader_selector() -> None:
         result = await scraper.get_page_text("/om")
 
     assert "Fallback content here" in result
+
+
+VAULT_PATH = "_publish/Bøker/Meldingar/2026/10 - Oktober/Weirdo.md"
+INDEX = {
+    "_publish/Hovud.md": {"frontmatter": {"permalink": "/", "title": "Heim"}},
+    VAULT_PATH: {
+        "frontmatter": {
+            "permalink": "melding/bok/weirdo",
+            "title": "Weirdo",
+            "tags": ["bok", None, "melding"],
+            "rating": 4,
+            "skipped": None,
+        },
+        "headings": [],
+    },
+    "_publish/logo.png": None,
+}
+RAW_MD = "---\ntitle: Weirdo\ndato: 2026-10-26\n---\n\nDenne var snedig.\n"
+
+
+def _fake_http(index: dict[str, object], raw: str = RAW_MD) -> AsyncMock:
+    async def fake(url: str) -> str:
+        if url == scraper.INDEX_URL:
+            return json.dumps(index)
+        return raw
+
+    return AsyncMock(side_effect=fake)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/melding/bok/weirdo",
+        "melding/bok/weirdo",
+        "melding/bok/weirdo/",
+        "https://markus.plus/melding/bok/weirdo",
+        "https://markus.plus/melding/bok/weirdo/?x=1#top",
+        "/melding/bok/Weirdo",
+        "/melding%2Fbok/weirdo".replace("%2F", "/"),
+    ],
+)
+def test_lookup_path_variants(value: str) -> None:
+    assert scraper._lookup_path(INDEX, value) == VAULT_PATH
+
+
+def test_lookup_path_home_and_vault_path() -> None:
+    assert scraper._lookup_path(INDEX, "/") == "_publish/Hovud.md"
+    assert scraper._lookup_path(INDEX, "https://markus.plus") == "_publish/Hovud.md"
+    assert scraper._lookup_path(INDEX, VAULT_PATH) == VAULT_PATH
+    assert scraper._lookup_path(INDEX, "/finst-ikkje") is None
+
+
+def test_normalize_path_decodes_percent_encoding() -> None:
+    assert scraper._normalize_path("/b%C3%B8ker/a%20b/") == "bøker/a b"
+
+
+def test_raw_url_encodes_segments() -> None:
+    url = scraper._raw_url(VAULT_PATH)
+    assert url.startswith(scraper.ACCESS_URL + "/_publish/B%C3%B8ker/Meldingar/2026/")
+    assert url.endswith("/10%20-%20Oktober/Weirdo.md")
+
+
+def test_strip_frontmatter() -> None:
+    assert scraper._strip_frontmatter(RAW_MD) == "Denne var snedig.\n"
+    assert scraper._strip_frontmatter("---\r\na: 1\r\n---\r\nBody") == "Body"
+    assert scraper._strip_frontmatter("---\n---\nBody") == "Body"
+    assert scraper._strip_frontmatter("No frontmatter\n---\nx") == "No frontmatter\n---\nx"
+    assert scraper._strip_frontmatter("---\nunclosed: yes\nBody") == "---\nunclosed: yes\nBody"
+
+
+def test_stringify_frontmatter() -> None:
+    result = scraper._stringify_frontmatter(INDEX[VAULT_PATH]["frontmatter"])  # type: ignore[index]
+    assert result == {
+        "permalink": "melding/bok/weirdo",
+        "title": "Weirdo",
+        "tags": "bok, melding",
+        "rating": "4",
+    }
+
+
+def test_permalinks_from_index() -> None:
+    assert scraper._permalinks_from_index(INDEX) == ["/", "/melding/bok/weirdo"]
+
+
+@pytest.mark.asyncio
+async def test_get_page_text_reads_raw_markdown() -> None:
+    with patch.object(scraper, "_http_get_text", new=_fake_http(INDEX)) as http:
+        result = await scraper.get_page_text("/melding/bok/weirdo")
+
+    assert result == "Denne var snedig.\n"
+    assert http.call_args.args[0].endswith("/10%20-%20Oktober/Weirdo.md")
+
+
+@pytest.mark.asyncio
+async def test_miss_refreshes_index_then_hits() -> None:
+    stale = {"_publish/Hovud.md": INDEX["_publish/Hovud.md"]}
+    # A cached index older than the refresh interval, as after a few minutes of uptime
+    scraper._index_cache["index"] = stale
+    scraper._last_index_fetch = time.monotonic() - 120
+    http = AsyncMock(side_effect=[json.dumps(INDEX), RAW_MD])
+    with patch.object(scraper, "_http_get_text", new=http):
+        result = await scraper.get_page_text("/melding/bok/weirdo")
+
+    assert result == "Denne var snedig.\n"
+    assert http.call_count == 2  # forced index refresh, raw markdown
+
+
+@pytest.mark.asyncio
+async def test_unknown_page_raises_and_refresh_is_rate_limited() -> None:
+    http = _fake_http(INDEX)
+    with patch.object(scraper, "_http_get_text", new=http):
+        with pytest.raises(scraper.PageNotFoundError, match="/nope"):
+            await scraper.get_page_text("/nope")
+        # Initial fetch just happened, so no forced refresh within 60 s
+        assert http.call_count == 1
+        scraper._last_index_fetch = time.monotonic() - 61
+        with pytest.raises(scraper.PageNotFoundError):
+            await scraper.get_page_text("/nope")
+        assert http.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_get_page_text_falls_back_when_raw_fetch_fails() -> None:
+    async def fake(url: str) -> str:
+        if url == scraper.INDEX_URL:
+            return json.dumps(INDEX)
+        raise httpx.ConnectError("offline")
+
+    with (
+        patch.object(scraper, "_http_get_text", new=AsyncMock(side_effect=fake)),
+        patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=SAMPLE_PAGE_HTML)),
+    ):
+        result = await scraper.get_page_text("/melding/bok/weirdo")
+
+    assert "Hello from markus.plus" in result
+
+
+@pytest.mark.asyncio
+async def test_index_with_wrong_shape_falls_back() -> None:
+    with (
+        patch.object(scraper, "_http_get_text", new=AsyncMock(return_value="[]")),
+        patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=SAMPLE_PAGE_HTML)),
+    ):
+        result = await scraper.get_page_text("/om")
+
+    assert "Hello from markus.plus" in result
+
+
+@pytest.mark.asyncio
+async def test_get_frontmatter_from_index() -> None:
+    with patch.object(scraper, "_http_get_text", new=_fake_http(INDEX)):
+        result = await scraper.get_page_frontmatter("https://markus.plus/melding/bok/weirdo")
+
+    assert result["title"] == "Weirdo"
+    assert result["tags"] == "bok, melding"
+    assert "skipped" not in result
+
+
+@pytest.mark.asyncio
+async def test_get_frontmatter_falls_back_to_html_when_unresolvable() -> None:
+    with (
+        patch.object(scraper, "_http_get_text", new=_fake_http(INDEX)),
+        patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=FRONTMATTER_HTML)),
+    ):
+        result = await scraper.get_page_frontmatter("/finst-ikkje")
+
+    assert result.get("title") == "My Page"
+
+
+@pytest.mark.asyncio
+async def test_list_all_pages_prefers_index() -> None:
+    with (
+        patch.object(scraper, "_http_get_text", new=_fake_http(INDEX)),
+        patch.object(scraper, "_fetch_sitemap", new=AsyncMock(side_effect=AssertionError)),
+    ):
+        result = await scraper.list_all_pages()
+
+    assert result == ["/", "/melding/bok/weirdo"]

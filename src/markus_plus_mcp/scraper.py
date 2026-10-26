@@ -2,16 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
+import re
+import time
 import xml.etree.ElementTree as ET
 from io import BytesIO
 from typing import Any
+from urllib.parse import quote, unquote, urlsplit
 
 import cachetools
+import httpx
 from bs4 import BeautifulSoup
 from playwright.async_api import Browser, async_playwright
 
 BASE_URL = "https://markus.plus"
 CONTENT_SELECTOR = ".markdown-preview-view"
+
+# Obsidian Publish serves the vault index and raw markdown without a browser
+SITE_ID = "8528a8f5ceabc10547ce0121dbdada5d"
+INDEX_URL = f"https://publish-01.obsidian.md/cache/{SITE_ID}"
+ACCESS_URL = f"https://publish-01.obsidian.md/access/{SITE_ID}"
+INDEX_REFRESH_INTERVAL = 60.0
+HTTP_TIMEOUT = 15.0
 
 _browser: Browser | None = None
 _browser_lock = asyncio.Lock()
@@ -20,6 +32,122 @@ _page_cache: cachetools.TTLCache[str, str] = cachetools.TTLCache(maxsize=100, tt
 _cache_lock = asyncio.Lock()
 _pages_cache: cachetools.TTLCache[str, list[str]] = cachetools.TTLCache(maxsize=1, ttl=1800)
 _pages_cache_lock = asyncio.Lock()
+_index_cache: cachetools.TTLCache[str, dict[str, Any]] = cachetools.TTLCache(maxsize=1, ttl=1800)
+_index_lock = asyncio.Lock()
+_last_index_fetch = float("-inf")
+
+_FRONTMATTER_RE = re.compile(
+    r"\A\ufeff?---[ \t]*\r?\n(?:.*?\r?\n)?(?:---|\.\.\.)[ \t]*(?:\r?\n|\Z)", re.DOTALL
+)
+
+
+class PageNotFoundError(LookupError):
+    """Raised when a path matches no page in the published vault."""
+
+
+async def _http_get_text(url: str) -> str:  # pragma: no cover
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT, follow_redirects=True) as client:
+        response = await client.get(url)
+        response.raise_for_status()
+        return response.text
+
+
+async def _fetch_index() -> dict[str, Any]:
+    data = json.loads(await _http_get_text(INDEX_URL))
+    if not isinstance(data, dict):
+        raise ValueError("Unexpected index format from Obsidian Publish")
+    return data
+
+
+async def _load_index(force: bool = False) -> dict[str, Any]:
+    """Return the cached vault index, fetching it when missing or when forced."""
+    global _last_index_fetch
+    async with _index_lock:
+        cached = _index_cache.get("index")
+        if cached is not None and not force:
+            return cached
+        # Stamp before fetching so a failing endpoint is not hammered either
+        _last_index_fetch = time.monotonic()
+        index = await _fetch_index()
+        _index_cache["index"] = index
+        return index
+
+
+def _normalize_path(path: str) -> str:
+    """Reduce a URL or path to a bare permalink: no host, no slashes, decoded."""
+    p = path.strip()
+    if "://" in p:
+        p = urlsplit(p).path
+    return unquote(p).strip("/")
+
+
+def _permalink_of(entry: Any) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    frontmatter = entry.get("frontmatter")
+    if not isinstance(frontmatter, dict):
+        return None
+    permalink = frontmatter.get("permalink")
+    return permalink.strip("/") if isinstance(permalink, str) else None
+
+
+def _lookup_path(index: dict[str, Any], path: str) -> str | None:
+    """Find the vault path for a permalink, falling back to case-insensitive and vault paths."""
+    wanted = _normalize_path(path)
+    folded: dict[str, str] = {}
+    for vault_path, entry in index.items():
+        if not vault_path.endswith(".md"):
+            continue
+        permalink = _permalink_of(entry)
+        if permalink is None:
+            continue
+        if permalink == wanted:
+            return str(vault_path)
+        folded.setdefault(permalink.casefold(), str(vault_path))
+    if wanted.casefold() in folded:
+        return folded[wanted.casefold()]
+    # Notes without a permalink are addressed by their vault path
+    for candidate in (wanted, f"{wanted}.md"):
+        if candidate.endswith(".md") and candidate in index:
+            return candidate
+    return None
+
+
+async def _resolve_page(path: str) -> str:
+    """Resolve a path to a vault path, refreshing the index once on a miss (max once a minute)."""
+    index = await _load_index()
+    vault_path = _lookup_path(index, path)
+    if vault_path is None and time.monotonic() - _last_index_fetch >= INDEX_REFRESH_INTERVAL:
+        vault_path = _lookup_path(await _load_index(force=True), path)
+    if vault_path is None:
+        raise PageNotFoundError(f"Page not found: {path}")
+    return vault_path
+
+
+def _strip_frontmatter(markdown: str) -> str:
+    """Remove a leading YAML frontmatter block, leaving the markdown body."""
+    match = _FRONTMATTER_RE.match(markdown)
+    if match is None:
+        return markdown
+    return markdown[match.end() :].lstrip("\r\n")
+
+
+def _stringify_frontmatter(frontmatter: dict[str, Any]) -> dict[str, str]:
+    """Flatten index frontmatter to strings: lists joined with ', ', nulls skipped."""
+    result: dict[str, str] = {}
+    for key, value in frontmatter.items():
+        if value is None:
+            continue
+        if isinstance(value, list):
+            result[str(key)] = ", ".join(str(v) for v in value if v is not None)
+        else:
+            result[str(key)] = str(value)
+    return result
+
+
+def _raw_url(vault_path: str) -> str:
+    encoded = "/".join(quote(segment, safe="") for segment in vault_path.split("/"))
+    return f"{ACCESS_URL}/{encoded}"
 
 
 async def _get_browser() -> Browser:  # pragma: no cover
@@ -54,6 +182,19 @@ async def _get_page_html(path: str) -> str:  # pragma: no cover
 
 
 async def get_page_text(path: str) -> str:
+    """Return the markdown body of a page, raising PageNotFoundError for unknown paths."""
+    try:
+        vault_path = await _resolve_page(path)
+        markdown = await _http_get_text(_raw_url(vault_path))
+    except PageNotFoundError:
+        raise
+    except (httpx.HTTPError, ValueError):
+        # Index or raw fetch unavailable: render the page in a browser instead
+        return await _get_rendered_text(path)
+    return _strip_frontmatter(markdown)
+
+
+async def _get_rendered_text(path: str) -> str:
     html = await _get_page_html(path)
     soup = BeautifulSoup(html, "html.parser")
     content = soup.select_one(CONTENT_SELECTOR)
@@ -114,11 +255,35 @@ async def _fetch_homepage_for_nav() -> str:  # pragma: no cover
         await page.close()
 
 
+def _permalinks_from_index(index: dict[str, Any]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for vault_path, entry in index.items():
+        permalink = _permalink_of(entry) if vault_path.endswith(".md") else None
+        if permalink is None:
+            continue
+        page = "/" + permalink
+        if page not in seen:
+            seen.add(page)
+            result.append(page)
+    return result
+
+
 async def list_all_pages() -> list[str]:
     async with _pages_cache_lock:
         cached = _pages_cache.get("pages")
         if cached is not None:
             return cached
+
+    # Prefer permalinks from the Obsidian Publish index (includes fresh notes)
+    try:
+        pages = _permalinks_from_index(await _load_index())
+        if pages:
+            async with _pages_cache_lock:
+                _pages_cache["pages"] = pages
+            return pages
+    except (httpx.HTTPError, ValueError):
+        pass
 
     # Try sitemap.xml first (Obsidian Publish standard, no JS needed)
     try:
@@ -162,9 +327,7 @@ async def list_all_pages() -> list[str]:
     return result
 
 
-async def search_pages(
-    query: str, offset: int = 0, page_size: int = 10
-) -> dict[str, Any]:
+async def search_pages(query: str, offset: int = 0, page_size: int = 10) -> dict[str, Any]:
     all_pages = await list_all_pages()
     total_pages = len(all_pages)
     batch = all_pages[offset : offset + page_size]
@@ -206,10 +369,21 @@ def _extract_property_value(val_el: Any) -> str:
     pills = val_el.select(".multi-select-pill-content")
     if pills:
         return ", ".join(p.get_text(strip=True) for p in pills)
-    return val_el.get_text(strip=True)
+    return str(val_el.get_text(strip=True))
 
 
 async def get_page_frontmatter(path: str) -> dict[str, str]:
+    try:
+        vault_path = await _resolve_page(path)
+        entry = (await _load_index()).get(vault_path)
+        if isinstance(entry, dict) and isinstance(entry.get("frontmatter"), dict):
+            return _stringify_frontmatter(entry["frontmatter"])
+    except (PageNotFoundError, httpx.HTTPError, ValueError):
+        pass
+    return await _get_rendered_frontmatter(path)
+
+
+async def _get_rendered_frontmatter(path: str) -> dict[str, str]:
     html = await _get_page_html(path)
     soup = BeautifulSoup(html, "html.parser")
     result: dict[str, str] = {}
