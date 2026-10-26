@@ -162,9 +162,7 @@ async def list_all_pages() -> list[str]:
     return result
 
 
-async def search_pages(
-    query: str, offset: int = 0, page_size: int = 10
-) -> dict[str, Any]:
+async def search_pages(query: str, offset: int = 0, page_size: int = 10) -> dict[str, Any]:
     all_pages = await list_all_pages()
     total_pages = len(all_pages)
     batch = all_pages[offset : offset + page_size]
@@ -206,7 +204,7 @@ def _extract_property_value(val_el: Any) -> str:
     pills = val_el.select(".multi-select-pill-content")
     if pills:
         return ", ".join(p.get_text(strip=True) for p in pills)
-    return val_el.get_text(strip=True)
+    return str(val_el.get_text(strip=True))
 
 
 async def get_page_frontmatter(path: str) -> dict[str, str]:

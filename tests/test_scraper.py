@@ -23,6 +23,7 @@ def _make_browser_mock(body: bytes) -> tuple[MagicMock, MagicMock]:
 
     return mock_browser, mock_page
 
+
 SAMPLE_PAGE_HTML = """
 <html>
 <body>
@@ -274,7 +275,9 @@ async def test_list_all_pages_uses_sitemap() -> None:
 @pytest.mark.asyncio
 async def test_list_all_pages_falls_back_to_nav() -> None:
     with (
-        patch.object(scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("network error"))),
+        patch.object(
+            scraper, "_fetch_sitemap", new=AsyncMock(side_effect=OSError("network error"))
+        ),
         patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_HTML)),
     ):
         result = await scraper.list_all_pages()
@@ -344,7 +347,9 @@ async def test_get_frontmatter_empty_when_no_table() -> None:
 
 @pytest.mark.asyncio
 async def test_get_frontmatter_obsidian_publish_format() -> None:
-    with patch.object(scraper, "_get_page_html", new=AsyncMock(return_value=OBSIDIAN_FRONTMATTER_HTML)):
+    with patch.object(
+        scraper, "_get_page_html", new=AsyncMock(return_value=OBSIDIAN_FRONTMATTER_HTML)
+    ):
         result = await scraper.get_page_frontmatter("/")
 
     assert result.get("permalink") == "/"
@@ -363,7 +368,9 @@ async def test_get_frontmatter_tags_as_pills() -> None:
 async def test_list_all_pages_falls_back_to_nav_file_title() -> None:
     with (
         patch("urllib.request.urlopen", side_effect=OSError("network error")),
-        patch.object(scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_FILE_TREE_HTML)),
+        patch.object(
+            scraper, "_fetch_homepage_for_nav", new=AsyncMock(return_value=NAV_FILE_TREE_HTML)
+        ),
     ):
         result = await scraper.list_all_pages()
 
