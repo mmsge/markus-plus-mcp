@@ -1,8 +1,0 @@
-services:
-  - type: web
-    name: markus-plus-mcp
-    runtime: docker
-    plan: free
-    envVars:
-      - key: PORT
-        value: 8000

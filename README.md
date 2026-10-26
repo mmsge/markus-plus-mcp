@@ -1,16 +1,13 @@
 # markus-plus-mcp
 MCP-server for markus.plus
 
-## Deploy til Render
-
-1. Gå til [render.com](https://render.com) og opprett eit nytt prosjekt.
-2. Kopla til GitHub-repoet ditt.
-3. Vel **Web Service** som tenestetype.
-4. Set runtime til **Docker**.
-5. Vel **gratis plan** (Free).
-6. Klikk **Deploy**.
-7. Kopier den offentlege URL-en Render tildeler tenesta.
-8. Legg URL-en inn i Claude.ai under **Settings → Connectors**.
+> **Pensjonert.** Denne tenesta er ikkje lenger i drift, og Render-jobben er fjerna.
+> Bruk `get_garden_page` og `get_garden_pages` i [activitypub-mcp](https://github.com/mmsge/activitypub-mcp)
+> for å lesa markus.plus. Sider som ikkje er ferdig rendra endå vert dessutan løyste av
+> [markus-plus-cloudflare-worker](https://github.com/mmsge/markus-plus-cloudflare-worker),
+> så vanleg henting av markus.plus gir òg innhaldet.
+>
+> Koden står att som referanse.
 
 ## Korleis sider vert lesne
 
